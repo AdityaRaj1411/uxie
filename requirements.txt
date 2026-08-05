@@ -1,0 +1,28 @@
+# ============================================================
+# Uxie — All Dependencies (single environment)
+# ============================================================
+
+# --- Core ---
+chromadb
+rank-bm25
+watchdog
+aiosqlite
+pyyaml
+google-genai
+httpx
+groq
+python-dotenv
+
+# --- Embedding Service ---
+fastapi
+uvicorn[standard]
+sentence-transformers
+torch
+
+# --- UI ---
+rich
+pyfiglet
+
+# --- Testing ---
+pytest
+pytest-asyncio

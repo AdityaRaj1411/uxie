@@ -1,0 +1,52 @@
+# ============================================================
+# Personal Second Brain — .gitignore
+# ============================================================
+
+# --- Secrets ---
+.env
+
+# --- Personal Data & Vault ---
+vault/
+drafts/
+logs/
+
+# --- Runtime Databases (generated, large, binary) ---
+db/
+
+# --- Auto-generated codebase snapshot (may contain secrets) ---
+codebase.md
+
+# --- Python Artifacts ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# --- Testing ---
+.pytest_cache/
+.coverage
+htmlcov/
+
+# --- IDE & Editor ---
+.vscode/
+.idea/
+*.suo
+*.user
+
+# --- OS Files ---
+.DS_Store
+Thumbs.db
+desktop.ini
+#--Extras--
+code_understanding_pivot_idea.md
+commands_guide.md
+list_models.py
+scratch_test.py
+README.md
+personal_second_brain_spec(final).md
+requirements-dev.txt
+requirements-ml.txt

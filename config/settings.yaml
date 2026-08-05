@@ -1,0 +1,72 @@
+# ============================================================
+# Personal Second Brain — Configuration
+# ============================================================
+
+# --- Paths (relative to project root) ---
+vault_path: "./vault"
+db_path: "./db/metadata.sqlite"
+chroma_path: "./db/chroma"
+drafts_path: "./drafts"
+logs_path: "./logs"
+
+# --- Embedding Service ---
+embedding_service:
+  host: "localhost"
+  port: 9500
+  model: "all-mpnet-base-v2"
+
+# --- Cloud LLM ---
+llm:
+  provider: "gemini"
+  model: "gemini-3.5-flash-lite"
+  api_key_env: "GEMINI_API_KEY"
+  max_context_tokens: 4096
+
+# --- Pivot Detector ---
+pivot_detector:
+  provider: "groq"
+  model: "llama-3.3-70b-versatile"
+  api_key_env: "GROQ_API_KEY"
+
+# --- Web Search (Tavily) ---
+web_search:
+  provider: "tavily"
+  api_key_env: "TAVILY_API_KEY"
+  max_results: 5
+
+# --- ChromaDB ---
+chroma:
+  collection_name: "vault_chunks"
+  distance_metric: "cosine"
+
+# --- Chunking ---
+chunking:
+  max_words: 300     # all-mpnet-base-v2 has a 512-token limit (~370 words). 300 ensures no truncation/dilution.
+  min_words: 50
+  overlap_words: 50
+
+# --- Retrieval ---
+retrieval:
+  top_k: 10
+  weights:
+    semantic: 0.5
+    bm25: 0.3
+    importance: 0.1
+    recency: 0.1
+  thresholds:
+    precise: 0.65
+    exploratory: 0.7
+    brainstorm: 0.85
+  recency_decay_lambda: 0.1
+
+# --- Graph ---
+graph:
+  max_neighbors_per_chunk: 5
+  max_hops: 2
+  min_strength: 0.4
+
+# --- Session ---
+session:
+  auto_draft_interval: 5  # save draft every N messages
+  history_prune_threshold: 20  # max messages before sliding window kicks in
+  history_prune_keep: 18       # messages to keep from tail when pruning
