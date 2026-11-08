@@ -22,11 +22,10 @@ llm:
   api_key_env: "GEMINI_API_KEY"
   max_context_tokens: 4096
 
-# --- Pivot Detector ---
-pivot_detector:
-  provider: "groq"
-  model: "llama-3.3-70b-versatile"
-  api_key_env: "GROQ_API_KEY"
+# --- Semantic Clustering Router (C++ AVX2 SIMD) ---
+semantic_router:
+  threshold: 0.55
+  dimension: 768     # matches all-mpnet-base-v2 (use 384 for MiniLM)
 
 # --- Web Search (Tavily) ---
 web_search:

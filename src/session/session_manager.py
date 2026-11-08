@@ -39,12 +39,14 @@ class SessionManager:
         auto_draft_interval: int = 5,
         prune_threshold: int = 20,
         prune_keep: int = 18,
+        router: Any = None,
     ):
         self._drafts_path = Path(drafts_path)
         self._draft_file = self._drafts_path / "session_draft.md"
         self._interval = auto_draft_interval
         self._prune_threshold = prune_threshold
         self._prune_keep = prune_keep
+        self.router = router
         self.session = Session()
 
         # Ensure drafts dir exists
@@ -53,10 +55,21 @@ class SessionManager:
         if self._draft_file.exists():
             self._draft_file.unlink()
 
-    def add_message(self, role: str, content: str) -> None:
-        """Add a message to the session and trigger auto-draft if needed."""
+    def add_message(
+        self,
+        role: str,
+        content: str,
+        embedding: list[float] | None = None
+    ) -> None:
+        """Add a message to the session, index into semantic router, and auto-draft if needed."""
         self.session.history.append(Message(role=role, content=content))
         self.session.message_count += 1
+
+        if self.router is not None:
+            try:
+                self.router.add_turn(role, content, embedding)
+            except Exception as e:
+                logger.warning("Failed to index message in semantic router: %s", e)
 
         if self.session.message_count % self._interval == 0:
             self._save_auto_draft()
@@ -85,18 +98,29 @@ class SessionManager:
         self.session.pivot_index = len(self.session.history)
         logger.info("Context pivot marked at message index %d", self.session.pivot_index)
 
-    def get_history_for_llm(self) -> list[dict[str, str]]:
-        """Format history for the LLM client with sliding-window token pruning.
+    def get_history_for_llm(self, route_payload: Any = None) -> list[dict[str, str]]:
+        """Format history for the LLM client using semantic routing or sliding-window pruning.
 
-        Rules:
-        - If history length <= prune_threshold: return the full history.
-        - If history length > prune_threshold: retain the first 2 messages
-          (system/continuity pair) plus the most recent *prune_keep* messages.
-
-        The full archive is always preserved in RAM and in SQLite; this
-        pruning only affects the payload sent to the LLM API.
+        If route_payload is provided and contains topic-matched messages, returns:
+          1. Head (continuity memory pair, if present)
+          2. Matched topic block messages
+          3. N-1 Safety Net (if from a different topic)
+        Otherwise falls back to sliding-window pruning.
         """
         full = [{"role": m.role, "content": m.content} for m in self.session.history]
+        head = full[:2] if len(full) >= 2 and full[0]["role"] == "user" and "Continuity Memory" in full[0]["content"] else []
+
+        if route_payload is not None and hasattr(route_payload, "matched_messages"):
+            routed: list[dict[str, str]] = list(head)
+            for m in route_payload.matched_messages:
+                # Avoid duplicate with head
+                if not any(h["content"] == m.content for h in routed):
+                    routed.append({"role": m.role, "content": m.content})
+            if route_payload.safety_net:
+                sn = route_payload.safety_net
+                if not any(r["content"] == sn.content for r in routed):
+                    routed.append({"role": sn.role, "content": sn.content})
+            return routed
 
         # Apply pivot cut (keep system prompt / continuity head, but drop pre-pivot messages)
         if self.session.pivot_index > 0:
