@@ -137,6 +137,128 @@ class LLMClient:
                     yield f"Error communicating with LLM: {e}"
                     return
 
+    async def generate_with_tools_stream(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        history: list[dict[str, str]] | None,
+        tools: list,
+        tool_executor,
+        max_tool_rounds: int = 3,
+    ):
+        """
+        Async generator that runs a tool-call loop then streams the final answer.
+
+        Flow:
+          1. Non-streaming call with tools so the model can emit function_call parts.
+          2. For each function_call: execute via tool_executor, append result to contents.
+          3. Repeat up to max_tool_rounds.
+          4. When no more function_calls:
+               - If a tool was used: stream the final answer (second LLM call).
+               - If no tool used:    yield the response text directly (already in memory).
+
+        Args:
+            system_prompt:  System instructions.
+            user_prompt:    Current user message.
+            history:        Previous turns [{role, content}, ...].
+            tools:          List of google.genai types.Tool objects.
+            tool_executor:  async callable(name: str, args: dict) -> str
+            max_tool_rounds: Safety cap on consecutive tool calls.
+
+        Yields:
+            str chunks (status messages + final answer text).
+        """
+        if not self._client:
+            yield "Error: LLM client is not configured. Missing GEMINI_API_KEY?"
+            return
+
+        # Build initial contents list from history + current user message
+        contents = []
+        if history:
+            for msg in history:
+                role = "user" if msg["role"] == "user" else "model"
+                contents.append(
+                    types.Content(role=role, parts=[types.Part.from_text(text=msg["content"])])
+                )
+        contents.append(
+            types.Content(role="user", parts=[types.Part.from_text(text=user_prompt)])
+        )
+
+        config_with_tools = types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            temperature=0.7,
+            tools=tools,
+        )
+        config_no_tools = types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            temperature=0.7,
+        )
+
+        tool_calls_made: list[str] = []
+        response = None
+
+        # --- Tool-call detection loop (non-streaming for each round) ---
+        for round_num in range(max_tool_rounds):
+            try:
+                response = await asyncio.to_thread(
+                    self._client.models.generate_content,
+                    model=self._model,
+                    contents=contents,
+                    config=config_with_tools,
+                )
+            except Exception as e:
+                logger.error("LLM tool-call round %d failed: %s", round_num, e)
+                yield f"Error communicating with LLM: {e}"
+                return
+
+            if not response.function_calls:
+                break  # Model is done calling tools; response.text has the final answer
+
+            # Execute each tool call in this round
+            tool_response_parts = []
+            for fc in response.function_calls:
+                tool_calls_made.append(fc.name)
+                logger.info(
+                    "LLM requested tool '%s' with args: %s", fc.name, dict(fc.args)
+                )
+                result = await tool_executor(fc.name, dict(fc.args))
+                tool_response_parts.append(
+                    types.Part.from_function_response(
+                        name=fc.name,
+                        response={"result": result},
+                    )
+                )
+
+            # Append model's function_call turn, then the tool results turn (Gemini requires role='user')
+            contents.append(response.candidates[0].content)
+            contents.append(types.Content(role="user", parts=tool_response_parts))
+
+        # --- Yield status indicator if any tool was called ---
+        if tool_calls_made:
+            yield "*(Checking the web...)*\n\n"
+
+        # --- Emit the final answer ---
+        if not tool_calls_made:
+            # No tools used: the first non-streaming response already has the answer.
+            # Yield it directly — same latency as generate(), no second round-trip.
+            yield response.text or ""
+        else:
+            # Tools were used: stream the final synthesis answer for a better UX.
+            try:
+                response_stream = await asyncio.to_thread(
+                    self._client.models.generate_content_stream,
+                    model=self._model,
+                    contents=contents,
+                    config=config_no_tools,
+                )
+                for chunk in response_stream:
+                    if chunk.text:
+                        yield chunk.text
+            except Exception as e:
+                logger.error("LLM final streaming after tool call failed: %s", e)
+                yield f"Error communicating with LLM: {e}"
+
+
     async def classify_structured(
         self,
         system_prompt: str,

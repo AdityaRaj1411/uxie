@@ -31,6 +31,7 @@ from src.graph.neighbor_expander import expand_neighbors
 from src.ingestion import ingest_file
 from src.llm_client import LLMClient
 from src.routing import SemanticRouter, RoutePayload, should_web_search
+from src.tools.search_tool import SEARCH_TOOL, execute_tool_call
 from src.orchestrator.intent_classifier import get_intent_params
 from src.rbac.confirmation import confirm_action, preview_save
 from src.rbac.permissions import ActionType, evaluate_permission, Permission
@@ -99,7 +100,7 @@ class Orchestrator:
             # Gemini API requires history to start with a 'user' role.
             # We inject a synthetic user-model pair to satisfy the API.
             synthetic_user = f"--- SYSTEM: Continuity Memory Restored ---\n{raw_memory}"
-            synthetic_model = "🧠 **Memory Restored:** Context acknowledged. Ready to continue."
+            synthetic_model = "  **Memory Restored:** Context acknowledged. Ready to continue."
             
             self.session_manager.add_message("user", synthetic_user)
             self.session_manager.add_message("assistant", synthetic_model)
@@ -145,11 +146,20 @@ class Orchestrator:
         
         # 1. /web <query> — force casual mode with web search regardless of decision
         cleaned_input = user_input.strip()
-        if cleaned_input.lower().startswith("/web "):
+        if cleaned_input.lower() == "/web" or cleaned_input.lower().startswith("/web "):
             actual_query = cleaned_input[5:].strip()
-            if actual_query:
-                self.session_manager.add_message("user", actual_query)
-                return self._handle_casual(actual_query, needs_web_search=True), self.session_manager.session.current_mode
+            if not actual_query:
+                return "Usage: `/web <query>` — Run a query with guaranteed live web search.", self.session_manager.session.current_mode
+            self.session_manager.add_message("user", actual_query)
+            return self._handle_casual(actual_query, force_web_search=True), self.session_manager.session.current_mode
+
+        # 1b. /deep <query> — force deep research mode (vault + web synthesis)
+        if cleaned_input.lower() == "/deep" or cleaned_input.lower().startswith("/deep "):
+            actual_query = cleaned_input[6:].strip()
+            if not actual_query:
+                return "Usage: `/deep <query>` — Perform exhaustive deep research using both vault notes and live web data.", self.session_manager.session.current_mode
+            self.session_manager.add_message("user", actual_query)
+            return self._handle_deep_research(actual_query, actual_query, self.session_manager.session.current_mode), self.session_manager.session.current_mode
 
         # 2. Check for other slash commands
         if cleaned_input.startswith("/"):
@@ -185,7 +195,7 @@ class Orchestrator:
             }
 
             # Format response
-            response = "### 🧠 Vault Library\n\n"
+            response = "###  Vault Library\n\n"
             for fp, headings in sorted(vault_content.items()):
                 if is_just_notes:
                     response += f"📄 `{fp}`\n"
@@ -290,14 +300,15 @@ class Orchestrator:
                 f"[Turn {route_payload.safety_net.turn}]" if route_payload.safety_net else "none"
             )
 
-        # Local classifier determines web search intent instantly
-        needs_web_search = should_web_search(user_input)
+        # Local classifier determines whether query is substantive enough to expose tools
+        is_substantive = should_web_search(user_input)
 
         # 3. Add to session history (updates both session_manager and semantic_router)
         self.session_manager.add_message("user", user_input, query_embedding)
 
         if mode == BuddyMode.CASUAL:
-            response_gen = self._handle_casual(user_input, needs_web_search=needs_web_search)
+            # For substantive queries, enable LLM tool-calling (LLM decides when/what to search)
+            response_gen = self._handle_casual(user_input, allow_tool=is_substantive)
             return response_gen, mode
 
         else:
@@ -410,34 +421,61 @@ class Orchestrator:
             f"  📜 {raw_file}  ← verbatim transcript"
         )
 
-    async def _handle_casual(self, user_input: str, needs_web_search: bool = False):
-        """Handle a casual chat, optionally augmented with a Tavily web search.
-
-        needs_web_search is decided by Groq's pivot detector. It is True for
-        substantive queries (explanations, how-tos, current events, deep dives)
-        and False for pure conversational fluff (thanks, follow-ups, greetings).
-        /web <query> forces needs_web_search=True regardless of Groq's decision.
+    async def _handle_casual(
+        self,
+        user_input: str,
+        force_web_search: bool = False,
+        allow_tool: bool = False,
+        needs_web_search: bool | None = None,
+    ):
+        """Handle a casual chat with three web search modes:
+        1. force_web_search=True (or /web <query>): runs Tavily immediately and injects results.
+        2. allow_tool=True (substantive queries): exposes SEARCH_TOOL to LLM, allowing the model
+           itself to decide whether to search, with its own generated search query!
+        3. Neither (pure fluff/greetings): directly streams LLM response with zero search latency.
         """
         import os
-        from src.tools.search_tool import tavily_search
+        from src.tools.search_tool import tavily_search, SEARCH_TOOL, execute_tool_call
+
+        if needs_web_search is not None and needs_web_search:
+            force_web_search = True
+
         system_prompt = get_system_prompt(BuddyMode.CASUAL, self._buddy_config_content)
         history = self.session_manager.get_history_for_llm(self._current_route_payload)
         if history and history[-1]["role"] == "user" and history[-1]["content"] == user_input:
             history = history[:-1]
 
-        web_context = ""
-        if needs_web_search:
+        # Case 1: Forced web search (e.g. via /web command)
+        if force_web_search:
             if os.environ.get("USER_MODE") != "1":
                 yield "*(Checking the web...)*\n\n"
-            max_results = self.config.get("web_search", {}).get("max_results", 3)
+            max_results = self.config.get("web_search", {}).get("max_results", 5)
             web_context = await tavily_search(user_input, max_results=max_results)
+            augmented_prompt = f"{web_context}\n\n--- USER QUERY ---\n{user_input}" if web_context else user_input
+            async for chunk in self.llm.generate_stream(system_prompt, augmented_prompt, history):
+                yield chunk
+            return
 
-        if web_context:
-            augmented_prompt = f"{web_context}\n\n--- USER QUERY ---\n{user_input}"
-        else:
-            augmented_prompt = user_input
+        # Case 2: LLM tool-calling mode (LLM decides when and what to search)
+        has_tavily = bool(os.environ.get("TAVILY_API_KEY"))
+        if allow_tool and SEARCH_TOOL is not None and has_tavily:
+            max_results = self.config.get("web_search", {}).get("max_results", 5)
 
-        async for chunk in self.llm.generate_stream(system_prompt, augmented_prompt, history):
+            async def tool_executor(name: str, args: dict) -> str:
+                return await execute_tool_call(name, args, max_results=max_results)
+
+            async for chunk in self.llm.generate_with_tools_stream(
+                system_prompt=system_prompt,
+                user_prompt=user_input,
+                history=history,
+                tools=[SEARCH_TOOL],
+                tool_executor=tool_executor,
+            ):
+                yield chunk
+            return
+
+        # Case 3: Fast conversational path (fluff, greetings, acknowledgements)
+        async for chunk in self.llm.generate_stream(system_prompt, user_input, history):
             yield chunk
 
 

@@ -50,7 +50,9 @@ async def cmd_help(context, arguments: str):
 | `/lint` | `/lint` | Evaluate structural health |
 | `/reindex` | `/reindex` | Rebuild indexing layers |
 | `/prune` | `/prune <note>` | Sever weak graph connections |
-| `/router` | `/router [threshold <val>]` | Inspect or tune C++ Semantic Router clusters |"""
+| `/router` | `/router [threshold <val>]` | Inspect or tune C++ Semantic Router clusters |
+| `/web` | `/web <query>` | Force live Tavily web search |
+| `/deep` | `/deep <query>` | Exhaustive research: synthesizes vault notes + live web |"""
     return help_text, context.session_manager.session.current_mode
 
 @registry.register("/router")
@@ -109,3 +111,23 @@ async def cmd_clear(context, arguments: str):
     context.session_manager.end_session()
     os.system('cls' if os.name == 'nt' else 'clear')
     return "🧹 Workspace cleared — clean slate.", context.session_manager.session.current_mode
+
+@registry.register("/web")
+@safe_command
+async def cmd_web(context, arguments: str):
+    """Force casual chat augmented with live Tavily web search."""
+    if not arguments.strip():
+        return "Usage: `/web <query>` — Run a query with guaranteed live web search.", context.session_manager.session.current_mode
+    context.session_manager.add_message("user", arguments.strip())
+    gen = context._handle_casual(arguments.strip(), force_web_search=True)
+    return gen, context.session_manager.session.current_mode
+
+@registry.register("/deep")
+@safe_command
+async def cmd_deep(context, arguments: str):
+    """Force exhaustive deep research synthesizing internal vault notes and live web."""
+    if not arguments.strip():
+        return "Usage: `/deep <query>` — Perform exhaustive deep research using both vault notes and live web data.", context.session_manager.session.current_mode
+    context.session_manager.add_message("user", arguments.strip())
+    gen = context._handle_deep_research(arguments.strip(), arguments.strip(), context.session_manager.session.current_mode)
+    return gen, context.session_manager.session.current_mode
