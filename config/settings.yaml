@@ -22,11 +22,11 @@ llm:
   api_key_env: "GEMINI_API_KEY"
   max_context_tokens: 4096
 
-# --- Semantic Clustering Router (C++ AVX2 SIMD) ---
-semantic_router:
-  threshold: 0.38    # 0.35-0.42 is best for short conversational turns; 0.55+ is for document retrieval
-  dimension: 768     # matches all-mpnet-base-v2 (use 384 for MiniLM)
-  min_words_for_pivot: 6  # turns with fewer words are always treated as continuations, never trigger pivot
+# --- Pivot Detector ---
+pivot_detector:
+  provider: "groq"
+  model: "llama-3.3-70b-versatile"
+  api_key_env: "GROQ_API_KEY"
 
 # --- Web Search (Tavily) ---
 web_search:

@@ -160,6 +160,19 @@ class PivotDetector:
                 return is_pivot, rewritten_query, needs_web_search
 
         except Exception as e:
-            logger.error(f"Groq pivot detection failed: {e}")
+            err_msg = str(e)
+            if ("model_not_found" in err_msg or "does not exist" in err_msg) and self.model == "llama-3.3-70b-versatile":
+                fallback_model = "qwen/qwen3.8-27b"
+                logger.warning(
+                    "Groq model '%s' not available on this account. Falling back to '%s'.",
+                    self.model, fallback_model
+                )
+                self.model = fallback_model
+                try:
+                    return await self.detect_pivot(user_input, history)
+                except Exception as inner_e:
+                    logger.error(f"Fallback Groq pivot detection failed: {inner_e}")
+            else:
+                logger.error(f"Groq pivot detection failed: {e}")
 
         return False, user_input, False

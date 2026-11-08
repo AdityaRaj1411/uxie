@@ -30,7 +30,7 @@ from src.graph.link_generator import generate_links
 from src.graph.neighbor_expander import expand_neighbors
 from src.ingestion import ingest_file
 from src.llm_client import LLMClient
-from src.routing import SemanticRouter, RoutePayload, should_web_search
+from src.groq_client import PivotDetector
 from src.tools.search_tool import SEARCH_TOOL, execute_tool_call
 from src.orchestrator.intent_classifier import get_intent_params
 from src.rbac.confirmation import confirm_action, preview_save
@@ -81,14 +81,7 @@ class Orchestrator:
         self._chunking = config.get("chunking", {})
         self._drafts_path = config.get("drafts_path", "./drafts")
 
-        # High-performance C++ Semantic Clustering Router (AVX2 SIMD)
-        router_cfg = config.get("semantic_router", {})
-        sim_threshold = router_cfg.get("threshold", 0.55)
-        default_dim = 768 if "mpnet" in str(config.get("embedding_service", {}).get("model", "")) else 384
-        emb_dim = router_cfg.get("dimension", default_dim)
-        self.semantic_router = SemanticRouter(dim=emb_dim, threshold=sim_threshold)
-        self.session_manager.router = self.semantic_router
-        self._current_route_payload: RoutePayload | None = None
+        self.pivot_detector = PivotDetector(config)
         
         self._buddy_config_content = load_buddy_config(vault_path)
 
@@ -239,76 +232,23 @@ class Orchestrator:
         # Default to the persistent session mode
         mode = self.session_manager.session.current_mode
         
-        # --- Semantic Clustering Routing + Zero-latency Web Search Classifier ---
-        router_cfg = self.config.get("semantic_router", {})
-        min_words_for_pivot = router_cfg.get("min_words_for_pivot", 6)
-        word_count = len(user_input.split())
-        is_short_turn = word_count < min_words_for_pivot
+        # --- Context Pivot Check + Web Search Flag (Groq) ---
+        # Look for a pivot using the history BEFORE we add the new user message.
+        # Groq also decides whether a live web search is needed (casual mode only).
+        history_for_pivot = self.session_manager.get_history_for_llm()
+        is_pivot, rewritten_input, needs_web_search = await self.pivot_detector.detect_pivot(
+            user_input, history_for_pivot
+        )
+        if is_pivot:
+            self.session_manager.pivot_context()
+            user_input = rewritten_input
+            logger.info("Pivot detected! Rewrote query to: %s", user_input)
 
-        query_embedding = None
-        if self.embedder:
-            try:
-                # Fast path: obtain normalized 384-dim embedding from local microservice
-                raw_emb = await self.embedder.encode_query(user_input)
-                if isinstance(raw_emb, (list, tuple)) and len(raw_emb) == self.semantic_router._dim:
-                    query_embedding = list(raw_emb)
-            except Exception as e:
-                logger.debug("Embedder not available for semantic router: %s", e)
-
-        if is_short_turn and self.semantic_router.num_turns > 0:
-            # Short follow-ups ("yup", "ok", "no") have near-random embeddings that
-            # falsely trigger topic pivots. Treat them as continuations of the current block.
-            logger.debug(
-                "Short turn (%d words) skipped for pivot detection — treated as continuation.",
-                word_count,
-            )
-            # Build a minimal payload that keeps the current block (no new topic)
-            route_payload = self.semantic_router.route(user_input, query_embedding)
-            # Force-override: if the C++ router created a new block for this short turn,
-            # collapse it back into the previous block state for context-assembly purposes.
-            if route_payload.new_topic_created:
-                # We still call route() so the turn is recorded in the DLL, but we
-                # suppress the "new topic" signal for context assembly.
-                route_payload = type(route_payload)(
-                    new_query=route_payload.new_query,
-                    matched_block_id=route_payload.matched_block_id,
-                    best_similarity=route_payload.best_similarity,
-                    new_topic_created=False,  # override
-                    matched_messages=route_payload.matched_messages,
-                    safety_net=route_payload.safety_net,
-                )
-                logger.debug(
-                    "Short-turn pivot suppressed (sim=%.4f). Keeping previous context block.",
-                    route_payload.best_similarity,
-                )
-        else:
-            # Route query against all existing Topic Block centroids (O(K*D) AVX2 SIMD)
-            route_payload = self.semantic_router.route(user_input, query_embedding)
-
-        self._current_route_payload = route_payload
-
-        if route_payload.new_topic_created:
-            logger.info(
-                "Semantic topic shift detected (sim=%.4f < threshold=%.2f). Starting new topic block.",
-                route_payload.best_similarity, self.semantic_router.threshold
-            )
-        elif route_payload.matched_block_id is not None:
-            logger.info(
-                "Semantic match with Topic Block %d (similarity: %.4f). Safety net: %s",
-                route_payload.matched_block_id,
-                route_payload.best_similarity,
-                f"[Turn {route_payload.safety_net.turn}]" if route_payload.safety_net else "none"
-            )
-
-        # Local classifier determines whether query is substantive enough to expose tools
-        is_substantive = should_web_search(user_input)
-
-        # 3. Add to session history (updates both session_manager and semantic_router)
-        self.session_manager.add_message("user", user_input, query_embedding)
+        # 3. Add to session history
+        self.session_manager.add_message("user", user_input)
 
         if mode == BuddyMode.CASUAL:
-            # For substantive queries, enable LLM tool-calling (LLM decides when/what to search)
-            response_gen = self._handle_casual(user_input, allow_tool=is_substantive)
+            response_gen = self._handle_casual(user_input, needs_web_search=needs_web_search, allow_tool=True)
             return response_gen, mode
 
         else:
@@ -441,7 +381,7 @@ class Orchestrator:
             force_web_search = True
 
         system_prompt = get_system_prompt(BuddyMode.CASUAL, self._buddy_config_content)
-        history = self.session_manager.get_history_for_llm(self._current_route_payload)
+        history = self.session_manager.get_history_for_llm()
         if history and history[-1]["role"] == "user" and history[-1]["content"] == user_input:
             history = history[:-1]
 
@@ -615,7 +555,7 @@ class Orchestrator:
 
         # 6. LLM Call
         system_prompt = get_system_prompt(mode, self._buddy_config_content)
-        history = self.session_manager.get_history_for_llm(self._current_route_payload)
+        history = self.session_manager.get_history_for_llm()
         if history and history[-1]["role"] == "user" and history[-1]["content"] == user_input:
             history = history[:-1]
         
