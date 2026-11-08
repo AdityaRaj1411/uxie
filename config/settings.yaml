@@ -25,7 +25,7 @@ llm:
 # --- Pivot Detector ---
 pivot_detector:
   provider: "groq"
-  model: "llama-3.3-70b-versatile"
+  model: "qwen/qwen3.8-27b"
   api_key_env: "GROQ_API_KEY"
 
 # --- Web Search (Tavily) ---

@@ -35,7 +35,11 @@ class PivotDetector:
     def __init__(self, config: dict):
         self.config = config.get("pivot_detector", {})
         api_key_env = self.config.get("api_key_env", "GROQ_API_KEY")
-        self.model = self.config.get("model", "llama-3.3-70b-versatile")
+        self.model = self.config.get("model", "qwen/qwen3.8-27b")
+        # Handle 32b naming variation -> active Groq model
+        if "32b" in self.model.lower() and "qwen" in self.model.lower():
+            logger.info("Mapping requested Qwen model '%s' to active Groq model 'qwen/qwen3.8-27b'", self.model)
+            self.model = "qwen/qwen3.8-27b"
 
         api_key = os.environ.get(api_key_env)
         self.client = None
