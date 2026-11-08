@@ -49,8 +49,58 @@ async def cmd_help(context, arguments: str):
 | `/absorb` | `/absorb <file_path>` | Ingest foreign file |
 | `/lint` | `/lint` | Evaluate structural health |
 | `/reindex` | `/reindex` | Rebuild indexing layers |
-| `/prune` | `/prune <note>` | Sever weak graph connections |"""
+| `/prune` | `/prune <note>` | Sever weak graph connections |
+| `/router` | `/router [threshold <val>]` | Inspect or tune C++ Semantic Router clusters |"""
     return help_text, context.session_manager.session.current_mode
+
+@registry.register("/router")
+@registry.register("/topics")
+@safe_command
+async def cmd_router(context, arguments: str):
+    """Inspect or adjust the C++ Semantic Clustering Router state."""
+    router = getattr(context, "semantic_router", None)
+    if not router:
+        return "Semantic router is not enabled.", context.session_manager.session.current_mode
+
+    args = arguments.strip().split()
+    if args and args[0].lower() == "threshold" and len(args) > 1:
+        try:
+            val = float(args[1])
+            router.threshold = val
+            return f"✅ Router similarity threshold updated to `{val:.2f}`.", context.session_manager.session.current_mode
+        except ValueError:
+            return f"❌ Invalid threshold `{args[1]}`. Please provide a float (e.g. `0.55`).", context.session_manager.session.current_mode
+
+    import json
+    raw_json = router.export_json()
+    data = json.loads(raw_json)
+
+    blocks = data.get("blocks", [])
+    num_blocks = len(blocks)
+    num_turns = data.get("num_turns", 0)
+    thresh = data.get("similarity_threshold", router.threshold)
+    dim = data.get("embedding_dim", router._dim)
+
+    res = [
+        f"### ⚡ Semantic Clustering Router Status (AVX2 SIMD)\n",
+        f"- **Topic Blocks**: {num_blocks}",
+        f"- **Total Turns**: {num_turns}",
+        f"- **Similarity Threshold**: `{thresh:.2f}`",
+        f"- **Vector Dimension**: {dim}\n",
+    ]
+
+    if not blocks:
+        res.append("*No topic blocks formed yet. Send a query to begin clustering.*")
+    else:
+        res.append("#### 📂 Active Conversation Chapters:\n")
+        for b in blocks:
+            b_id = b.get("block_id")
+            msgs = b.get("messages", [])
+            first_msg = msgs[0]["content"][:60] if msgs else "(empty)"
+            turns_str = f"Turns {msgs[0]['turn']}–{msgs[-1]['turn']}" if msgs else "empty"
+            res.append(f"- **Block {b_id}** ({len(msgs)} turns, {turns_str}):\n  *\"{first_msg}...\"*")
+
+    return "\n".join(res), context.session_manager.session.current_mode
 
 @registry.register("/clear")
 @safe_command
