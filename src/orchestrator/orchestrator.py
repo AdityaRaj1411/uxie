@@ -230,6 +230,11 @@ class Orchestrator:
         mode = self.session_manager.session.current_mode
         
         # --- Semantic Clustering Routing + Zero-latency Web Search Classifier ---
+        router_cfg = self.config.get("semantic_router", {})
+        min_words_for_pivot = router_cfg.get("min_words_for_pivot", 6)
+        word_count = len(user_input.split())
+        is_short_turn = word_count < min_words_for_pivot
+
         query_embedding = None
         if self.embedder:
             try:
@@ -240,8 +245,36 @@ class Orchestrator:
             except Exception as e:
                 logger.debug("Embedder not available for semantic router: %s", e)
 
-        # Route query against all existing Topic Block centroids (O(K*D) AVX2 SIMD)
-        route_payload = self.semantic_router.route(user_input, query_embedding)
+        if is_short_turn and self.semantic_router.num_turns > 0:
+            # Short follow-ups ("yup", "ok", "no") have near-random embeddings that
+            # falsely trigger topic pivots. Treat them as continuations of the current block.
+            logger.debug(
+                "Short turn (%d words) skipped for pivot detection — treated as continuation.",
+                word_count,
+            )
+            # Build a minimal payload that keeps the current block (no new topic)
+            route_payload = self.semantic_router.route(user_input, query_embedding)
+            # Force-override: if the C++ router created a new block for this short turn,
+            # collapse it back into the previous block state for context-assembly purposes.
+            if route_payload.new_topic_created:
+                # We still call route() so the turn is recorded in the DLL, but we
+                # suppress the "new topic" signal for context assembly.
+                route_payload = type(route_payload)(
+                    new_query=route_payload.new_query,
+                    matched_block_id=route_payload.matched_block_id,
+                    best_similarity=route_payload.best_similarity,
+                    new_topic_created=False,  # override
+                    matched_messages=route_payload.matched_messages,
+                    safety_net=route_payload.safety_net,
+                )
+                logger.debug(
+                    "Short-turn pivot suppressed (sim=%.4f). Keeping previous context block.",
+                    route_payload.best_similarity,
+                )
+        else:
+            # Route query against all existing Topic Block centroids (O(K*D) AVX2 SIMD)
+            route_payload = self.semantic_router.route(user_input, query_embedding)
+
         self._current_route_payload = route_payload
 
         if route_payload.new_topic_created:
